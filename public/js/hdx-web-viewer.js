@@ -121,9 +121,15 @@ function addFilesToSelectBox(pdb_files, fasta_file) {
 
   // Display first structure of the list
   nglSelectedPdbFilePath = $(`#sel-ngl-pdb-output-${datasetTmpId} option:first`).val();
-  replaceStructure(nglSelectedPdbFilePath, true, function(o) {
+  replaceStructure(nglSelectedPdbFilePath, true, function(loadedComponent) {
+  
+    /*loadedComponent.structure.eachAtom(function (a) {
+      let bfactor = a.bfactor;
+      console.log("atom bfactor: ", a.resno, bfactor);
+    });*/
+  
     // Call autoView only once
-    o.autoView();
+    loadedComponent.autoView();
     
     // Run later
     /*setTimeout(function(){
@@ -202,6 +208,7 @@ function createNglColorScheme(gradientColorScale) {
     let selection;
     params.structure.eachAtom(function (a) {
       let bfactor = a.bfactor;
+
       if (bfactor != -1) {
         min = Math.min(min, bfactor);
         if (bfactor < 30) max = Math.max(max, bfactor);
@@ -236,8 +243,9 @@ function createNglColorScheme(gradientColorScale) {
       .out('num');
     
     this.atomColor = function (atom) {
-      //console.log(atom);
-      return calcResidueColorforHDX(nglColorScale, atom.resno, atom.bfactor);
+      var color = calcResidueColorforHDX(nglColorScale, atom.resno, atom.bfactor);
+      //console.log(color);
+      return color;
 
       /*if (atom.residueIndex == selectedResNumber) newColor = 0x00FF00;
       else if (atom.bfactor == -1) {
@@ -365,7 +373,7 @@ function replaceStructure(pdbFilePath,displayLoader, cb) {
   let oldComponent = nglStructByName[pdbFileName];
   if (oldComponent) {
     nglReprByName[pdbFileName] = oldComponent.addRepresentation( $("#sel-ngl-repr option:selected").val(), { colorScheme: nglColorScheme} );
-    cb(oldComponent);
+    if (cb) cb(oldComponent);
     return;
   }
 
@@ -373,6 +381,7 @@ function replaceStructure(pdbFilePath,displayLoader, cb) {
     if (oldComponent && nglStructByName[pdbFileName]) {
       oldComponent.dispose();
     }
+    
     /*for (let structName in nglReprByName) {
       if (structName != pdbFileName) {
         nglReprByName[structName].dispose();

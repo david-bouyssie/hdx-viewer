@@ -27,10 +27,11 @@ use Mojolicious::Commands;
 @{app->static->paths} = (dirname($0).'\public');
 #push @{app->static->paths}, dirname($0).'\public';
 
-say join("\n",@{app->static->paths});
+say "HDX-Viewer will load static files from: " .join("\n",@{app->static->paths});
 
 ### TODO: create a job directory
 my $UPLOAD_DIR = "./public/uploads/";
+my $last_job_number = 0;
 
 # Render template "index.html.ep" from the DATA section
 get '/' => sub ($c) {
@@ -44,21 +45,30 @@ post '/upload' => sub {
   # Check file size
   return $c->render(json => {error => "One of the files is too big"}, status => 200) if $c->req->is_limit_exceeded;
   
-  my @files;
+  #my @files;
   my $pdb_file_name;
   my $pml_file_name;
   for my $file (@{$c->req->uploads('files')}) {
     my $size = $file->size;
     my $name = $file->filename;
-    $file->move_to($UPLOAD_DIR . $file->filename);
+    my $uploaded_file_location = $UPLOAD_DIR . $file->filename;
+    say "uploaded_file_location: $uploaded_file_location";
+    
+    $file->move_to($uploaded_file_location);
     if ($name =~ /.+\.pdb/) {$pdb_file_name = $name; }
     if ($name =~ /.+\.pml/) {$pml_file_name = $name; }
-    push(@files, $file->filename);
+    #push(@files, $file->filename);
   }
    
   if ($pdb_file_name && $pml_file_name) {
-    my ($output_files, $bfactor_mapping) = pml2pdb($UPLOAD_DIR . $pdb_file_name, $UPLOAD_DIR . $pml_file_name);
-    my $fasta_file = pdb2fasta($UPLOAD_DIR . $pdb_file_name);
+    $last_job_number += 1;
+    
+    my $uid_as_str = _generate_job_uid($last_job_number);
+    my $job_dir = $UPLOAD_DIR . "/job_$uid_as_str";
+    mkdir($job_dir);
+    
+    my ($output_files, $bfactor_mapping) = pml2pdb($job_dir, $UPLOAD_DIR . $pdb_file_name, $UPLOAD_DIR . $pml_file_name);
+    my $fasta_file = pdb2fasta($job_dir, $UPLOAD_DIR . $pdb_file_name);
     
     $c->render(json => {pdb_files => $output_files, fasta_file => $fasta_file, bfactor_mapping => $bfactor_mapping} );
   } else {
@@ -66,18 +76,43 @@ post '/upload' => sub {
   }
 };
 
+sub _generate_job_uid($job_number) {
+  ### See: https://stackoverflow.com/questions/30731917/generate-a-unique-id-in-perl
+  my $random_id = join '', map int rand 10, 1..6 ;
+  my $uid_as_str = $random_id.'-'.time."-$job_number"; #Data::GUID->new->as_string;
+  return $uid_as_str;
+}
+
 get '/test' => sub ($c) {
   say "hello";
   $c->render(text => 'I ♥ Mojolicious!');
 };
 
 get '/download_results' => sub ($c) {
-  say "hello";
+  #say "hello";
   
+  #my $files = $c->req->json;
   my $fasta_file = $c->param('fasta_file');
   my @pdb_files = @{$c->every_param('pdb_files[]')};
   
-  #my $files = $c->req->json;
+  if (not $fasta_file =~ /^\.\/public/) {
+    #say "invalid fasta_file file location";
+    return $c->reply->exception("invalid fasta_file file location");
+  }
+  
+  my $job_suffix;
+  if ($fasta_file =~ /^\.\/public\/demo/ ) {
+    $job_suffix = 'demo-dataset';
+  } else {
+    $job_suffix = basename(dirname($fasta_file));
+    #say "fasta_file: ". $fasta_file;
+  }
+  
+  my $zip_file_name = "./public/downloads/hdx-viewer-$job_suffix.zip";
+  #say "exists: ". -f $zip_file_name;
+  
+  ### Return cache if exists
+  return $c->render(text => $zip_file_name) if -f $zip_file_name;
   
   my $zip = Archive::Zip->new();
    
@@ -85,11 +120,6 @@ get '/download_results' => sub ($c) {
   #my $file_member = $zip->addFile( 'xyz.pl', 'AnotherName.pl' );
   $zip->addFile( $fasta_file, basename($fasta_file) );
   $zip->addFile( $_ , basename($_) ) foreach @pdb_files;
- 
-  ### See: https://stackoverflow.com/questions/30731917/generate-a-unique-id-in-perl
-  my $random_id = join '', map int rand 10, 1..6 ;
-  my $uid_as_str = $random_id  .'-'.time; #Data::GUID->new->as_string;
-  my $zip_file_name = "./public/downloads/hdx-viewer-job_$uid_as_str.zip";
   
   # Save the Zip file
   if ( $zip->writeToFileNamed($zip_file_name) != AZ_OK ) {
@@ -98,9 +128,6 @@ get '/download_results' => sub ($c) {
   
   $c->render(text => $zip_file_name);
 };
-
-
-
 
 under sub {
   my $c = shift;
@@ -145,17 +172,18 @@ websocket '/title' => sub ($c) {
 };
 
 ### START APP AND DAEMON ###
-app->start;
-
-### ENABLE ME FOR PAR::Packer usage
-#my $daemon = Mojo::Server::Daemon->new(app => app, listen => ['http://*:8080']);
-#$daemon->start;
-
-#Mojo::IOLoop->start unless Mojo::IOLoop->is_running;
+if (app->mode eq 'hdx-viewer-dev') { app->start; }
+else {
+  app->start;
+  
+  my $daemon = Mojo::Server::Daemon->new(app => app, listen => ['http://*:8080']);
+  $daemon->start;
+  Mojo::IOLoop->start unless Mojo::IOLoop->is_running;
+}
 
 ### Source: https://github.com/kad-ecoli/pdb2fasta/blob/master/pdb2fasta.pl
 ### See also: http://cupnet.net/pdb2fasta/
-sub pml2pdb($pdb_path,$pml_path) {
+sub pml2pdb($job_dir, $pdb_path, $pml_path) {
 
   my($pdb_name,$pdb_dir,$pdb_ext) = fileparse($pdb_path,'.pdb');
   my($pml_name,$pml_dir,$pml_ext) = fileparse($pml_path,'.pml');
@@ -177,11 +205,12 @@ sub pml2pdb($pdb_path,$pml_path) {
 
   while (my $line = <PML_FILE>) {
     #print $line;
-    if ($line =~ /alter \/\w+\/\/(\w+)\/(\d+), properties\[".*?(\d+\s\w+)"\] = ([-]?\d+[\.,]\d+)/) { # (\w+) was ([A-Z]+) but we need also numbers for chains
+    if ($line =~ /alter \/\w+\/\/(\w+)\/(\d+), properties\[".*?(\d+\s\w+)"\] = ([-]?\d+[\.,]?\d*)/) { # (\w+) was ([A-Z]+) but we need also numbers for chains
       my $chains = $1;
       my $residue_pos = $2;
       my $time_point = $3;
       my $b_factor = $4 + 0;
+      #say "residue_pos $residue_pos b_factor = $b_factor";
       
       $time_point =~ s/\s/_/g;
 
@@ -213,7 +242,8 @@ sub pml2pdb($pdb_path,$pml_path) {
     my $pdb_name = $pml_name."_$time_point.pdb";
     $pdb_name_by_time_point{$time_point} = $pdb_name;
 
-    my $pdb_path = $pdb_dir.'/'.$pdb_name;
+    #my $pdb_path = $pdb_dir.'/'.$pdb_name;
+    my $pdb_path = $job_dir.'/'.$pdb_name;
     push(@output_files, $pdb_path);
     
     my $fh;
@@ -236,6 +266,8 @@ sub pml2pdb($pdb_path,$pml_path) {
     # Exemple: ATOM  23404  CA  LEU N 237     -87.407  -0.364 160.421  1.00 78.66           C
     # Exemple: ATOM    914  N   LEU A 115    -104.983  71.146  72.849  1.00  0.01           N
     if ($line =~ /ATOM\s+\d+\s+\w+\s+\w+\s+([A-Z])\s+(-*\d+)/ || $line =~ /HETATM\s+\d+\s+\w+\s+\w+\s+([A-Z])\s+(-*\d+)/) {
+    
+      #say "found atom line";
 
       ### Récupère la correspondance time_point -> b_factor
       my $chain = $1;
@@ -246,27 +278,54 @@ sub pml2pdb($pdb_path,$pml_path) {
       
       ### Pour chaque time point du fichier PML
       foreach my $time_point (@sorted_time_points) {
+      
         ### Récupère le B factor pour le time point considéré
-        my $b_factor = $b_factor_by_time_point->{ "$time_point" } || -1;
-        my $b_factor_len = length($b_factor);
+        my $obs_bfactor = $b_factor_by_time_point->{ "$time_point" };
+        my $b_factor = defined $obs_bfactor ? $obs_bfactor : -1;
+        my $b_factor_len = length("$b_factor");
+        
+        #say "found bfactor";
         
         ### Substitue le B factor dans la ligne provenant du fichier PDB
         #print $line;
-        if ($line =~ /(ATOM\s+\d+\s+\w+\s+\w+\s+[A-Z]\s+\d+\s+\S+\s+\S+\s+\S+\s+\d+\.\d{2}\s*)(\S+)(\s+)([A-Z]\s*)/ ||
-            $line =~ /(HETATM\s+\d+\s+\w+\s+\w+\s+[A-Z]\s+\d+\s+\S+\s+\S+\s+\S+\s+\d+\.\d{2}\s*)(\S+)(\s+)([A-Z]\s*)/
+        if ($line =~ /(ATOM\s+\d+\s+\w+\s+\w+\s+[A-Z]\s+\d+\s+\S+\s+\S+\s+\S+\s+\d+\.\d{2})(\s*)(\S+)(\s+)([A-Z]\s*)/ ||
+            $line =~ /(HETATM\s+\d+\s+\w+\s+\w+\s+[A-Z]\s+\d+\s+\S+\s+\S+\s+\S+\s+\d+\.\d{2})(\s*)(\S+)(\s+)([A-Z]\s*)/
           ) {
+          #say "found old bfactor";
+          
           my $before_b_factor = $1;
-          my $old_b_factor = $2;
-          my $space_after_b_factor = $3;
-          my $after_b_factor = $4;
+          my $before_b_factor_space = $2;
+          my $old_b_factor = $3;
+          my $space_after_b_factor = $4;
+          my $after_b_factor = $5;
+          
+          my $before_b_factor_space_len = length($before_b_factor_space);
           my $old_b_factor_len = length($old_b_factor);
           my $space_len = length($space_after_b_factor);
           
-          my $new_space_len = ($old_b_factor_len + $space_len) - $b_factor_len;
+          my $new_space_len = ($before_b_factor_space_len -1 ) + ($old_b_factor_len + $space_len) - $b_factor_len;
           my $new_space_after_b_factor = ' ' x $new_space_len;
           
-          $line = "$before_b_factor$b_factor$new_space_after_b_factor$after_b_factor";               
+          $line = "$before_b_factor $b_factor$new_space_after_b_factor$after_b_factor";               
         }
+        
+        # if ($line =~ /(ATOM\s+\d+\s+\w+\s+\w+\s+[A-Z]\s+\d+\s+\S+\s+\S+\s+\S+\s+\d+\.\d{2}\s*)(\S+)(\s+)([A-Z]\s*)/ ||
+            # $line =~ /(HETATM\s+\d+\s+\w+\s+\w+\s+[A-Z]\s+\d+\s+\S+\s+\S+\s+\S+\s+\d+\.\d{2}\s*)(\S+)(\s+)([A-Z]\s*)/
+          # ) {
+          # my $before_b_factor = $1;
+          # my $old_b_factor = $2;
+          # my $space_after_b_factor = $3;
+          # my $after_b_factor = $4;
+          # my $old_b_factor_len = length($old_b_factor);
+          # my $space_len = length($space_after_b_factor);
+          
+          # my $new_space_len = ($old_b_factor_len + $space_len) - $b_factor_len;
+          # my $new_space_after_b_factor = ' ' x $new_space_len;
+          
+          # $line = "$before_b_factor$b_factor$new_space_after_b_factor$after_b_factor";               
+        # }
+        
+        
         #die $line;
         my $file = $file_by_time_point {$time_point};
         print $file $line;
@@ -309,7 +368,7 @@ sub pml2pdb($pdb_path,$pml_path) {
   return (\@output_files,\%b_factor_mapping);
 }
 
-sub pdb2fasta($pdb_path) {
+sub pdb2fasta($job_dir, $pdb_path) {
   my($pdb_name,$pdb_dir,$pdb_ext) = fileparse($pdb_path,'.pdb');
   $pdb_dir =~ s/\/$//;
 
@@ -329,7 +388,7 @@ sub pdb2fasta($pdb_path) {
      #print "$aa_table{ lc($aa) }";
     
     chomp($line);
-	  last if ($line=~/^ENDMDL/); # just the first model
+    last if ($line=~/^ENDMDL/); # just the first model
     
     if ($line=~/^ATOM\s{2,6}\d{1,5}\s{2}CA\s[\sA]([A-Z]{3})\s([\s\w])\s+?(\d+)/
      or $line=~/^HETATM\s{0,4}\d{1,5}\s{2}CA\s[\sA](MSE)\s([\s\w])\s+?(\d+)/) {
@@ -342,7 +401,8 @@ sub pdb2fasta($pdb_path) {
   }
   close PDB_FILE;
   
-  my $fasta_file_path = "$pdb_dir/$pdb_name.fasta";
+  #my $fasta_file_path = "$pdb_dir/$pdb_name.fasta";
+  my $fasta_file_path = "$job_dir/$pdb_name.fasta";
   open(FASTA_FILE,'>',$fasta_file_path) or die $!;
   
   foreach my $chain(sort keys %chain_hash){
@@ -360,7 +420,7 @@ sub pdb2fasta($pdb_path) {
     say FASTA_FILE ">$pdb_name:$chain\n$seq";
   }
 
-  say "fasta ok";
+  #say "fasta ok";
   
   close FASTA_FILE;
 
@@ -498,7 +558,7 @@ __DATA__
             <table>
               <tbody>
                 <tr>
-                  <td style="width: 140px;">Deuteration Range:</td>
+                  <td style="width: 180px;">Deuteration Range (%):</td>
                   <td><input id="txt-ngl-bfactor-min" required="" placeholder="Min value" type="text"></td>
                   <td><input id="txt-ngl-bfactor-max" required="" placeholder="Max value" type="text"></td>
                 </tr>
