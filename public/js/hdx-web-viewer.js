@@ -946,7 +946,7 @@ function displayFastaFile(fastaURL) {
       }
     });
     
-    // Customize menu items
+    // --- Customize menu items --- //
     var menuItems = $('#div-fasta').parent().children().first().children();
     
     menuItems.eq(0).hide(); // Hide "Import" menu
@@ -981,6 +981,8 @@ function displayFastaFile(fastaURL) {
   MSA.u.file.importURL(fastaURL, function(){
     if (newMSA) MSA.render();
     //MSA.g.colorscheme.set("scheme", "hdx");
+    
+    $('.biojs_msa_labels').css('color','white');
   });
 
 }
