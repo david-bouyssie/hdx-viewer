@@ -45,30 +45,31 @@ post '/upload' => sub {
   # Check file size
   return $c->render(json => {error => "One of the files is too big"}, status => 200) if $c->req->is_limit_exceeded;
   
+  $last_job_number += 1;
+  
+  my $uid_as_str = _generate_job_uid($last_job_number);
+  my $job_dir = $UPLOAD_DIR . "/job_$uid_as_str";
+  mkdir($job_dir);
+  mkdir("$job_dir/input");
+  
   #my @files;
-  my $pdb_file_name;
-  my $pml_file_name;
+  my $pdb_file_path;
+  my $pml_file_path;
   for my $file (@{$c->req->uploads('files')}) {
     my $size = $file->size;
     my $name = $file->filename;
-    my $uploaded_file_location = $UPLOAD_DIR . $file->filename;
+    my $uploaded_file_location = $job_dir . '/input/' . $file->filename;
     say "uploaded_file_location: $uploaded_file_location";
     
     $file->move_to($uploaded_file_location);
-    if ($name =~ /.+\.pdb/) {$pdb_file_name = $name; }
-    if ($name =~ /.+\.pml/) {$pml_file_name = $name; }
+    if ($name =~ /.+\.pdb/) {$pdb_file_path = $uploaded_file_location; }
+    if ($name =~ /.+\.pml/) {$pml_file_path = $uploaded_file_location; }
     #push(@files, $file->filename);
   }
    
-  if ($pdb_file_name && $pml_file_name) {
-    $last_job_number += 1;
-    
-    my $uid_as_str = _generate_job_uid($last_job_number);
-    my $job_dir = $UPLOAD_DIR . "/job_$uid_as_str";
-    mkdir($job_dir);
-    
-    my ($output_files, $bfactor_mapping) = pml2pdb($job_dir, $UPLOAD_DIR . $pdb_file_name, $UPLOAD_DIR . $pml_file_name);
-    my $fasta_file = pdb2fasta($job_dir, $UPLOAD_DIR . $pdb_file_name);
+  if ($pdb_file_path && $pml_file_path) {
+    my ($output_files, $bfactor_mapping) = pml2pdb($job_dir, $pdb_file_path, $pml_file_path);
+    my $fasta_file = pdb2fasta($job_dir, $pdb_file_path);
     
     $c->render(json => {pdb_files => $output_files, fasta_file => $fasta_file, bfactor_mapping => $bfactor_mapping} );
   } else {
@@ -100,11 +101,14 @@ get '/download_results' => sub ($c) {
     return $c->reply->exception("invalid fasta_file file location");
   }
   
-  my $job_suffix;
+  my( $job_dir, $job_suffix);
   if ($fasta_file =~ /^\.\/public\/demo/ ) {
+    $job_dir = './public/demo';
     $job_suffix = 'demo-dataset';
   } else {
-    $job_suffix = basename(dirname($fasta_file));
+    $job_dir = dirname($fasta_file);
+    $job_suffix = basename($job_dir);
+    
     #say "fasta_file: ". $fasta_file;
   }
   
@@ -115,13 +119,20 @@ get '/download_results' => sub ($c) {
   return $c->render(text => $zip_file_name) if -f $zip_file_name;
   
   my $zip = Archive::Zip->new();
-   
-  ### Add a file from disk
+  
+  ### Add input files
+  $zip->addDirectory("input");
+  my @input_files = <$job_dir/input/*.*>;
+  foreach my $input_file (@input_files) {
+    $zip->addFile( $input_file, 'input/' . basename($input_file) );
+  }
+  
+  ### Add output files
   #my $file_member = $zip->addFile( 'xyz.pl', 'AnotherName.pl' );
   $zip->addFile( $fasta_file, basename($fasta_file) );
   $zip->addFile( $_ , basename($_) ) foreach @pdb_files;
   
-  # Save the Zip file
+  ### Save the Zip file
   if ( $zip->writeToFileNamed($zip_file_name) != AZ_OK ) {
     say "can't create ZIP archive '$zip_file_name'";
   }
