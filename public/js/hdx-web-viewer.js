@@ -44,6 +44,7 @@ var nglStructByName = {};
 var nglReprByName = {};
 var nglOrientations = [];
 var nglSelectedPdbFilePath;
+var selectedChainIndex = -1;
 var selectedResNumber = -1;
 var lastRespAsJSON = null;
 var datasetTmpId = 1;
@@ -174,9 +175,9 @@ function loadDemoFiles() {
   addFilesToSelectBox(demoRespAsJSON.pdb_files, demoRespAsJSON.fasta_file);
 }
 
-function calcResidueColorforHDX(colorScale, residueNumber, bfactor) {
+function calcResidueColorForHDX(colorScale, bfactor, chainIndex, residueNumber) {
   let newColor = null;
-  if (residueNumber == selectedResNumber) newColor = 0x00FF00;
+  if (chainIndex == selectedChainIndex && residueNumber == selectedResNumber) newColor = 0x00FF00;
   else if (bfactor == -1) {
     if (nglUndetectedRegionColor == 'black') newColor = 0x000000;
     else if (nglUndetectedRegionColor == 'grey') newColor = 0xAAAAAA;
@@ -243,7 +244,7 @@ function createNglColorScheme(gradientColorScale) {
       .out('num');
     
     this.atomColor = function (atom) {
-      var color = calcResidueColorforHDX(nglColorScale, atom.resno, atom.bfactor);
+      var color = calcResidueColorForHDX(nglColorScale, atom.bfactor, atom.chainIndex, atom.resno);
       //console.log(color);
       return color;
 
@@ -901,7 +902,7 @@ msaCustomColorScheme.run = function(letter,opts){
   let bfactor = chainData[resNumber + 1];
   bfactor = bfactor == null ? -1 : bfactor;
 
-  return decimalColorToHex(calcResidueColorforHDX(nglColorScale, resNumber + 1, bfactor));
+  return decimalColorToHex(calcResidueColorForHDX(nglColorScale, bfactor, chainIndex, resNumber + 1));
 
   //return nglColorByResIndex.length ? nglColorByResIndex[resIndex] : "white";
 };
@@ -936,7 +937,8 @@ function displayFastaFile(fastaURL) {
     
     MSA.g.on("residue:click", function(data){
       selectedResNumber = data.rowPos + 1;
-      console.log(data);
+      selectedChainIndex = data.seqId;
+      //console.log(data);
       
       for (let structName in nglReprByName) {
         nglReprByName[structName].setColor(nglColorScheme);
