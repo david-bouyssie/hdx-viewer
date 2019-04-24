@@ -73,7 +73,7 @@ post '/upload' => sub {
     
     $c->render(json => {pdb_files => $output_files, fasta_file => $fasta_file, bfactor_mapping => $bfactor_mapping} );
   } else {
-    $c->render(json => {error => "Missing PDB or PML file"} );
+    $c->render(json => {error => "Invalid input: wrong PDB/PML file formats"} );
   }
 };
 

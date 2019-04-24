@@ -62,9 +62,13 @@ window.onload = function() {
     done: function (e, data) {
     
       var respAsJSON = data.jqXHR.responseJSON;
-      lastRespAsJSON = respAsJSON;
-      
-      addFilesToSelectBox(respAsJSON.pdb_files, respAsJSON.fasta_file);
+      if (respAsJSON.error) {
+        alert(respAsJSON.error);
+      }
+      else {
+        lastRespAsJSON = respAsJSON;
+        addFilesToSelectBox(respAsJSON.pdb_files, respAsJSON.fasta_file);
+      }
     },
     progressall: function (e, data) {
       var progress = parseInt(data.loaded / data.total * 100, 10);
