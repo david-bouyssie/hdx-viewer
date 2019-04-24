@@ -6,6 +6,7 @@ use 5.20.0;
 use Archive::Zip qw( :ERROR_CODES :CONSTANTS );
 use Data::Dumper;
 use File::Basename;
+use Try::Tiny;
 #my $dirname = dirname(__FILE__);
 
 use Mojolicious::Lite -signatures;
@@ -68,10 +69,16 @@ post '/upload' => sub {
   }
    
   if ($pdb_file_path && $pml_file_path) {
-    my ($output_files, $bfactor_mapping) = pml2pdb($job_dir, $pdb_file_path, $pml_file_path);
-    my $fasta_file = pdb2fasta($job_dir, $pdb_file_path);
-    
-    $c->render(json => {pdb_files => $output_files, fasta_file => $fasta_file, bfactor_mapping => $bfactor_mapping} );
+    try {
+      my ($output_files, $bfactor_mapping) = pml2pdb($job_dir, $pdb_file_path, $pml_file_path);
+      my $fasta_file = pdb2fasta($job_dir, $pdb_file_path);
+      
+      $c->render(json => {pdb_files => $output_files, fasta_file => $fasta_file, bfactor_mapping => $bfactor_mapping} );
+    } catch {
+      warn "caught error: $_"; # not $@
+      $c->render(json => {error => "Data loading failed\n$_"} );
+    };
+   
   } else {
     $c->render(json => {error => "Invalid input: wrong PDB/PML file formats"} );
   }
@@ -216,8 +223,11 @@ sub pml2pdb($job_dir, $pdb_path, $pml_path) {
 
   while (my $line = <PML_FILE>) {
     #print $line;
-    if ($line =~ /alter \/\w+\/\/(\w+)\/(\d+), properties\[".*?(\d+\s\w+)"\] = ([-]?\d+[\.,]?\d*)/) { # (\w+) was ([A-Z]+) but we need also numbers for chains
+    #if ($line =~ /alter \/\w+\/\/(\w+)\/(\d+), properties\[".*?(\d+\s\w+)"\] = ([-]?\d+[\.,]?\d*)/) {
+    if ($line =~ /alter \/\w+\/\/(\w*)\/([-]\d+).*, properties\[".*\s(\d+\s\w+)"\] = (.+)/) {
       my $chains = $1;
+      die "Invalid PML entry, missing chain information in line: $line" if length($chains) == 0;
+      
       my $residue_pos = $2;
       my $time_point = $3;
       my $b_factor = $4 + 0;
