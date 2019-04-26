@@ -1,85 +1,85 @@
 body {
-	background-color: #333333;
-	font-family: Sans-serif;
-	color: white;
-	}
-	
+  background-color: #333333;
+  font-family: Sans-serif;
+  color: white;
+  }
+  
 h1 {
-	font-size: 3.5em;
+  font-size: 3.5em;
 }
-	
+  
 p{
-	margin: 10px;
+  margin: 10px;
 }
-	
+  
 table {
-	width: 100%;
-	cellspacing: 50;
-	cellpadding: 0;
-	border: 0;
+  width: 100%;
+  cellspacing: 50;
+  cellpadding: 0;
+  border: 0;
 }
-	
+  
 td {
-	height: 40px;
-	/*width: 100px;*/
-	margin: 10px;
-	background-color: #333333;
+  height: 40px;
+  /*width: 100px;*/
+  margin: 10px;
+  background-color: #333333;
 }
 
 .tdbutton{
-	height: 60px;
-	text-align: center;
+  height: 60px;
+  text-align: center;
 }
 
 .tdtitre {
-	font-weight: bold;
-	width: 200px;
+  font-weight: bold;
+  width: 200px;
 }
 
 ::placeholder { /* Chrome, Firefox, Opera, Safari 10.1+ */
   color: #eeab69;
   opacity: 0.75; /* Firefox */
 }
-	
+  
 .bouton {
-	width: 150px;
+  width: 180px;
   height: 38px;
-	cursor: pointer;
-	text-transform: capitalize;
-	border: none;
-	padding: 10px 0 10px 0;
-	border-radius: 8px;
-	background: #d34836;
-	font-weight: bold;
-	color: #fff;
+  cursor: pointer;
+  text-transform: capitalize;
+  border: none;
+  padding: 10px 0 10px 0;
+  border-radius: 8px;
+  background: #d34836;
+  font-weight: bold;
+  color: #fff;
 }
 
 .upload-btn-wrapper {
   position: relative;
   width: 180px;
   height: 38px;
-	/*overflow: hidden;*/
-	display: inline-block;
+  /*overflow: hidden;*/
+  display: inline-block;
 }
 
 .upload-btn {
   position: absolute;
-	width: 180px;
+  width: 180px;
   height: 38px;
   cursor: pointer !important;
   pointer-events: auto;
-	border: 0px solid gray;
- 	color: #ffffff;
-	text-transform: capitalize;
-	background-color: #d34836;
-	padding: 10px 0 10px 0;
-	border-radius: 8px;
-	font-weight: bold;
+  border: 0px solid gray;
+  color: #ffffff;
+  text-transform: capitalize;
+  background-color: #d34836;
+  padding: 10px 0 10px 0;
+  border-radius: 8px;
+  font-weight: bold;
 }
 
 .upload-label {
   position: relative;
-	width: 180px;
+  width: 180px;
   height: 38px;
   overflow: hidden;
   float: right;
@@ -90,12 +90,12 @@ td {
   position: absolute;
   cursor: pointer !important;
   pointer-events: auto;
-	font-size: 1px;
+  font-size: 1px;
   width: 100%;
   height: 100%;
-	left: 0;
-	top: 0;
-	opacity: 0;
+  left: 0;
+  top: 0;
+  opacity: 0;
 }
 
 .cadre {
@@ -119,18 +119,18 @@ td {
 
 legend {
   color: #eeab69;
-	font-size: 18px;
-	font-weight: bold;
-	padding: 0px;
-	margin: 0px;
-	display: block;
+  font-size: 18px;
+  font-weight: bold;
+  padding: 0px;
+  margin: 0px;
+  display: block;
 }
 
 input[type=text] {
   padding: 5px 5px;
-	border: 2px solid #eeab69;
+  border: 2px solid #eeab69;
   border-radius: 4px;
-	background-color: grey;
+  background-color: grey;
   color: white;
 }
 
@@ -140,7 +140,7 @@ select {
   border: 2px solid #eeab69;
   border-radius: 4px;
   background-color: grey;
-	color: #ffffff;
+  color: #ffffff;
 }
 
 /* Modification des cases à cocher */

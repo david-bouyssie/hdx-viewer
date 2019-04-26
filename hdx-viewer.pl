@@ -6,7 +6,11 @@ use 5.20.0;
 use Archive::Zip qw( :ERROR_CODES :CONSTANTS );
 use Data::Dumper;
 use File::Basename;
+use File::Copy;
+use File::Slurp qw/read_file write_file/;
+use POSIX;
 use Try::Tiny;
+
 #my $dirname = dirname(__FILE__);
 
 use Mojolicious::Lite -signatures;
@@ -30,7 +34,9 @@ use Mojolicious::Commands;
 
 say "HDX-Viewer will load static files from: " .join("\n",@{app->static->paths});
 
-### TODO: create a job directory
+my $hde_heatmap_colors_map = parse_hdexaminer_colors( [read_file("./conf/hdexaminer_heatmap_colors.txt")] );
+my $hde_diff_heatmap_colors_map = parse_hdexaminer_colors( [read_file("./conf/hdexaminer_diff_heatmap_colors.txt")] );
+
 my $UPLOAD_DIR = "./public/uploads/";
 my $last_job_number = 0;
 
@@ -40,7 +46,7 @@ get '/' => sub ($c) {
 };
 
 # Multipart upload handler
-post '/upload' => sub {
+post '/pdb_upload' => sub {
   my $c = shift;
 
   # Check file size
@@ -48,46 +54,175 @@ post '/upload' => sub {
   
   $last_job_number += 1;
   
-  my $uid_as_str = _generate_job_uid($last_job_number);
-  my $job_dir = $UPLOAD_DIR . "/job_$uid_as_str";
-  mkdir($job_dir);
-  mkdir("$job_dir/input");
+  try {
   
-  #my @files;
-  my $pdb_file_path;
-  my $pml_file_path;
-  for my $file (@{$c->req->uploads('files')}) {
-    my $size = $file->size;
-    my $name = $file->filename;
-    my $uploaded_file_location = $job_dir . '/input/' . $file->filename;
-    say "uploaded_file_location: $uploaded_file_location";
+    my $uid_as_str = _generate_job_uid($last_job_number);
+    my $job_dir = $UPLOAD_DIR . "/job_$uid_as_str";
+    mkdir($job_dir);
     
-    $file->move_to($uploaded_file_location);
-    if ($name =~ /.+\.pdb/) {$pdb_file_path = $uploaded_file_location; }
-    if ($name =~ /.+\.pml/) {$pml_file_path = $uploaded_file_location; }
-    #push(@files, $file->filename);
-  }
-   
-  if ($pdb_file_path && $pml_file_path) {
+    my $cur_date = strftime "%Y-%m-%d %H:%M:%S", localtime time;
+    my $user = $c->whois;
+    say "Starting new job session in directory '$job_dir' for user '$user'";
+    
+    open(LOGFILE, '>>', "$UPLOAD_DIR/connections.log") or die $!;
+    say LOGFILE "New connection of '$user' at $cur_date";
+    close LOGFILE;
+    
+    my $job_input_dir = "$job_dir/input";
+    mkdir("$job_input_dir");
+    
+    my @files = @{$c->req->uploads('file')};
+    return $c->render(json => {error => "Can't upload/process more than one PDB file at a time"}, status => 200) if scalar(@files) > 1;
+    
+    my( $fasta_file, $chains );
+    for my $file (@files) {
+      my $size = $file->size;
+      my $name = $file->filename;
+      if (not $name =~ /.+\.pdb/) { return $c->render(json => {error => "Invalid input: file must be in PDB format"} ); }
+      
+      my $uploaded_file_location = "$job_input_dir/" . $file->filename;
+      say "Uploaded PDB file location: $uploaded_file_location";
+      
+      $file->move_to($uploaded_file_location);
+      
+      ($fasta_file, $chains) = pdb2fasta($job_dir, $uploaded_file_location);
+    }
+    
+    $c->render(json => {job_id => $uid_as_str, detected_chains => $chains} );
+    
+  } catch {
+    warn "caught error: $_"; # not $@
+    $c->render(json => {error => "PDB files upload failed\n". _split_error_msg($_)} );
+  };
+  
+};
+
+# Multipart upload handler
+post '/pml_upload' => sub {
+  my $c = shift;
+
+  # Check file size
+  return $c->render(json => {error => "One of the files is too big"}, status => 200) if $c->req->is_limit_exceeded;
+  
+  my $job_id = $c->req->param('job_id');
+  my $chains = $c->req->param('chains');
+  
+  ### Check inputs
+  return $c->render(json => {error => "Can't continue since no PDB files were uploaded"}, status => 200) unless $job_id;
+  return $c->render(json => {error => "Invalid characters in provided chains '$chains'"}, status => 200) unless $chains =~ /^[a-zA-Z0-9]+$/;
+  
+  try {
+    my $job_dir = $UPLOAD_DIR . "/job_$job_id";
+    my $job_input_dir = "$job_dir/input";
+    my $job_chains_input_dir = "$job_dir/input/$chains";
+    mkdir($job_chains_input_dir);
+    
+    for my $file (@{$c->req->uploads('files')}) {
+      my $size = $file->size;
+      my $name = $file->filename;
+      if (not $name =~ /.+\.pml/) { $c->render(json => {error => "Invalid input: file must be in PML format"} ); }
+      
+      my $uploaded_file_location = "$job_chains_input_dir/" . $file->filename;
+      say "Uploaded PML file location: $uploaded_file_location";
+      
+      $file->move_to($uploaded_file_location);
+    }
+    
+    $c->render(json => {job_id => $job_id, chains => $chains } );
+    
+  } catch {
+    warn "caught error: $_"; # not $@
+    $c->render(json => {error => "PML files upload failed\n". _split_error_msg($_)} );
+  };
+  
+};
+
+# Multipart upload handler
+get '/process_files' => sub {
+  my $c = shift;
+  
+  my $job_id = $c->req->param('job_id');
+  my $chains = $c->req->param('chains');
+  
+  ### Check inputs
+  return $c->render(json => {error => "Can't continue since no input files were uploaded"}, status => 200) unless $job_id;
+  return $c->render(json => {error => "Invalid characters in provided chains '$chains'"}, status => 200) unless $chains =~ /^[a-zA-Z0-9]+$/;
+  
+  my $job_dir = $UPLOAD_DIR . "/job_$job_id";
+  my $job_input_dir = "$job_dir/input";
+  my $job_chains_input_dir = "$job_dir/input/$chains";
+  my $temp_dir = "$job_dir/temp";
+  
+  my @pdb_files = <$job_input_dir/*.pdb>;
+  say "Found ".scalar(@pdb_files). " PDB files in current job directory ($job_dir)";
+  my $pdb_file_path = shift(@pdb_files);
+  
+  my @fasta_files = <$job_dir/*.fasta>;
+  say "Found ".scalar(@fasta_files). " FASTA files in current job directory ($job_dir)";
+  my $fasta_file = shift(@fasta_files);
+  
+  my @pml_file_paths = <$job_chains_input_dir/*.pml>;
+  say "Found ".scalar(@pml_file_paths). " PML files in current chains directory ($job_chains_input_dir)";
+  
+  my $pml_files_count = scalar(@pml_file_paths);
+  if ($pdb_file_path && $pml_files_count) {
+  
+    ### Create/backup merge PML file
+    my($pdb_name,$pdb_dir,$pdb_ext) = fileparse($pdb_file_path,'.pdb');
+    my $merged_pml_file_path = prepare_merged_pml_file($temp_dir, $pdb_name);
+    my $merged_pml_file_backup_path = $merged_pml_file_path. '.bak';
+    
     try {
-      my ($output_files, $bfactor_mapping) = pml2pdb($job_dir, $pdb_file_path, $pml_file_path);
-      my $fasta_file = pdb2fasta($job_dir, $pdb_file_path);
+      if (-f $merged_pml_file_path) {
+        copy($merged_pml_file_path,$merged_pml_file_backup_path) or die "Merged PML backup failed: $!";
+      }
+      
+      my $is_hdexaminer_pml = is_hdexaminer_pml($pml_file_paths[0]);
+      
+      if ($is_hdexaminer_pml) {
+        hdexaminer2dynamx(\@pml_file_paths, $chains, $merged_pml_file_path, $temp_dir);
+      }
+      else {
+        #$merged_pml_file_path = $pml_files_count == 1 ? $pml_file_paths[0] : merge_pml_files(\@pml_file_paths, $merged_pml_file_path);
+        merge_pml_files(\@pml_file_paths, $merged_pml_file_path);
+      }
+      
+      my ($output_files, $bfactor_mapping) = pml2pdb($job_dir, $pdb_file_path, $merged_pml_file_path);
+      
+      ### Remove backup
+      unlink $merged_pml_file_backup_path if -f $merged_pml_file_backup_path;
       
       $c->render(json => {pdb_files => $output_files, fasta_file => $fasta_file, bfactor_mapping => $bfactor_mapping} );
     } catch {
       warn "caught error: $_"; # not $@
-      $c->render(json => {error => "Data loading failed\n$_"} );
+      
+      say "Removing uploaded and generated PML files...";
+      for my $file (@pml_file_paths, $merged_pml_file_path) {
+        unlink $file if -f $file;
+      }
+      
+      say "Restoring previous merged PML file...";
+      if (-f $merged_pml_file_backup_path) {
+        copy($merged_pml_file_backup_path,$merged_pml_file_path) or die "Merged PML restore failed: $!";
+      }
+      
+      $c->render(json => {error => "Data loading failed\n". _split_error_msg($_) } );
     };
    
   } else {
-    $c->render(json => {error => "Invalid input: wrong PDB/PML file formats"} );
+    $c->render(json => {error => "Invalid input: missing PDB or PML input files"} );
   }
 };
+
+sub _split_error_msg($error) {
+  my @parts = split(' at ', $error);
+  return scalar(@parts) ? $parts[0] : '';
+}
 
 sub _generate_job_uid($job_number) {
   ### See: https://stackoverflow.com/questions/30731917/generate-a-unique-id-in-perl
   my $random_id = join '', map int rand 10, 1..6 ;
-  my $uid_as_str = $random_id.'-'.time."-$job_number"; #Data::GUID->new->as_string;
+  my $uid_as_str = join('-',time,$job_number,$random_id); #Data::GUID->new->as_string;
   return $uid_as_str;
 }
 
@@ -97,10 +232,10 @@ get '/test' => sub ($c) {
 };
 
 get '/download_results' => sub ($c) {
-  #say "hello";
   
   #my $files = $c->req->json;
   my $fasta_file = $c->param('fasta_file');
+  my $pml_format = $c->param('pml_format');
   my @pdb_files = @{$c->every_param('pdb_files[]')};
   
   if (not $fasta_file =~ /^\.\/public/) {
@@ -111,7 +246,7 @@ get '/download_results' => sub ($c) {
   my( $job_dir, $job_suffix);
   if ($fasta_file =~ /^\.\/public\/demo/ ) {
     $job_dir = './public/demo';
-    $job_suffix = 'demo-dataset';
+    $job_suffix = lc($pml_format) .'-demo-dataset';
   } else {
     $job_dir = dirname($fasta_file);
     $job_suffix = basename($job_dir);
@@ -147,9 +282,17 @@ get '/download_results' => sub ($c) {
   $c->render(text => $zip_file_name);
 };
 
+# A helper to identify visitors
+helper whois => sub {
+  my $c     = shift;
+  my $agent = $c->req->headers->user_agent || 'Anonymous';
+  my $ip    = $c->tx->remote_address;
+  return "$agent ($ip)";
+};
+
 under sub {
   my $c = shift;
-  say "test globals";
+  #say "test globals";
   $c->res->headers->access_control_allow_origin('*');
   return 1;
 };
@@ -199,6 +342,112 @@ else {
   Mojo::IOLoop->start unless Mojo::IOLoop->is_running;
 }
 
+
+sub is_hdexaminer_pml($pml_path) {
+  my $pml_as_str = read_file($pml_path);
+  return ($pml_as_str =~ /set_color/);
+}
+
+sub hdexaminer2dynamx($pml_paths, $chains_as_str, $merged_pml_file, $temp_dir) {
+  
+  my (@converted_pml_paths, @time_points_in_secs);
+  for my $pml_path (@$pml_paths) {
+    my $pml_as_str = read_file($pml_path);
+    my @pml_lines = split("\n", $pml_as_str);
+    
+    ### FIXME: check the two palettes and die if none of them matches
+    my $is_hde_palette = check_hdexaminer_colors(\@pml_lines, $hde_heatmap_colors_map);
+    my $is_hde_diff_palette = check_hdexaminer_colors(\@pml_lines, $hde_diff_heatmap_colors_map);
+    die "Can't use provided PML files: the heatmap colors must be based on HDExaminer defaults" if (!$is_hde_palette && !$is_hde_diff_palette);
+    
+    my $pml_name = basename($pml_path);
+    my ($pml_prefix, $hdx_time, $dmx_unit, $pml_suffix) = ($pml_name,0,'sec', '');
+    if ($pml_name =~ /(.+)_(\d+)([smh])(.*)\.pml/) {
+      $pml_prefix = $1;
+      $hdx_time = $2;
+      my $hde_unit = $3;
+      $pml_suffix = $4 || '';
+
+      if ($hde_unit eq 's') {
+        push(@time_points_in_secs, $hdx_time);
+      }
+      if ($hde_unit eq 'm') {
+        push(@time_points_in_secs, $hdx_time * 60);
+        $dmx_unit = 'min';
+      }
+      elsif ($hde_unit eq 'h') {
+        push(@time_points_in_secs, $hdx_time * 3600);
+        $dmx_unit = 'hour';  ### FIXME: check this
+      }
+    }
+    
+    my $new_pml_file_path = "$temp_dir/$pml_name";
+    open(NEW_PML, '>', $new_pml_file_path) or die $!;
+    
+    for my $line (@pml_lines) {
+      if ($line =~ /color deutColor(\d+)x(\d),resi (\d+)-(\d+)/) { # set_color deutColor(\d+x\d)=(\[.+\])/) {
+        my $color_major_num = $1;
+        my $color_minor_num = $2;
+        my $min_res_num = $3;
+        my $max_res_num = $4;
+        
+        my $b_factor = $is_hde_palette ? "$1$2" / 100 : 2 * ( ("$1$2" / 100) - 0.6);
+        
+        for my $res_num ($min_res_num .. $max_res_num) {
+          #say NEW_PML "alter /$pml_prefix//$chains_as_str/$res_num, properties[\"$pdb_name $hdx_time $dmx_unit ($pml_prefix$pml_suffix)\"] = $b_factor";
+          my $properies_str = "$hdx_time $dmx_unit ($pml_prefix$pml_suffix)";
+          $properies_str =~ s/ /_/g;
+          say NEW_PML "alter /$pml_prefix//$chains_as_str/$res_num, properties[\"$properies_str\"] = $b_factor";
+        }
+      }
+    }
+    
+    close NEW_PML;
+    
+    push(@converted_pml_paths, $new_pml_file_path);
+  }
+
+  ### Sort generated PMLs by time
+  my @sorted_time_points_idx = sort { $time_points_in_secs[$a] <=> $time_points_in_secs[$b] } 0 .. $#time_points_in_secs;
+  my @sorted_converted_pml_paths = @converted_pml_paths[@sorted_time_points_idx];
+
+  merge_pml_files(\@sorted_converted_pml_paths, $merged_pml_file);
+}
+
+sub check_hdexaminer_colors($pml_as_str, $ref_color_map) {
+  my $input_file_palette = parse_hdexaminer_colors($pml_as_str);
+  
+  while (my($idx,$color) = each(%$input_file_palette)) {
+    my $ref_color = $ref_color_map->{$idx};
+    return 0 if $ref_color ne $color;
+  }
+
+  return 1;
+}
+
+sub parse_hdexaminer_colors($colors_lines) {
+  
+  my %rvb_by_idx;
+  for my $line (@$colors_lines) {
+    if ($line =~ /set_color deutColor(\d+x\d)=(\[.+\])/) {
+      $rvb_by_idx{$1} = $2;
+    }
+  }
+  
+  return \%rvb_by_idx;
+}
+
+sub prepare_merged_pml_file($temp_dir, $pdb_name) {
+  mkdir $temp_dir;
+  my $merged_pml_file = "$temp_dir/$pdb_name.pml";
+}
+
+sub merge_pml_files($pml_paths, $merged_pml_file) {  
+  my @pml_files_to_merge = -f $merged_pml_file ? ($merged_pml_file, @$pml_paths) : @$pml_paths;
+  my $merge_str =  join( '', map { read_file($_) } @pml_files_to_merge);
+  write_file($merged_pml_file, $merge_str);
+}
+
 ### Source: https://github.com/kad-ecoli/pdb2fasta/blob/master/pdb2fasta.pl
 ### See also: http://cupnet.net/pdb2fasta/
 sub pml2pdb($job_dir, $pdb_path, $pml_path) {
@@ -222,18 +471,28 @@ sub pml2pdb($job_dir, $pdb_path, $pml_path) {
   open(PML_FILE,"<",$pml_path) or die $!;
 
   while (my $line = <PML_FILE>) {
-    #print $line;
-    #if ($line =~ /alter \/\w+\/\/(\w+)\/(\d+), properties\[".*?(\d+\s\w+)"\] = ([-]?\d+[\.,]?\d*)/) {
-    if ($line =~ /alter \/\w+\/\/(\w*)\/([-]\d+).*, properties\[".*\s(\d+\s\w+)"\] = (.+)/) {
+    
+    if ($line =~ /^$/ ) {next;}
+    #elsif ($line =~ /alter \/\w+\/\/(\w+)\/(\d+), properties\[".*?(\d+\s\w+)"\] = ([-]?\d+[\.,]?\d*)/) {
+    elsif ($line =~ /alter \/\w+\/\/(\w*)\/([-]?\d+).*, properties\["(.+)"\] = (.+)/) {
       my $chains = $1;
       die "Invalid PML entry, missing chain information in line: $line" if length($chains) == 0;
       
       my $residue_pos = $2;
-      my $time_point = $3;
-      my $b_factor = $4 + 0;
+      my $time_point_str = $3;
+      my $b_factor = $4;
+      $b_factor =~ s/,/\./;
+      $b_factor += 0;
+      
       #say "residue_pos $residue_pos b_factor = $b_factor";
       
-      $time_point =~ s/\s/_/g;
+      my $time_point;
+      if ($time_point_str =~ /.*\s(\d+\s\w+)/) {
+        $time_point = $1;
+        $time_point =~ s/\s/_/g;
+      } else {
+        $time_point = $time_point_str
+      }
 
       #say join("\t",$chain,$residue_pos,$time_point, $b_factor);
       my @chain_list = split('', $chains);
@@ -252,6 +511,8 @@ sub pml2pdb($job_dir, $pdb_path, $pml_path) {
   }
 
   close PML_FILE;
+  
+  #say Dumper \@sorted_time_points;
 
   ### On ouvre en écriture autant de fichier que de time points
   my @output_files;
@@ -260,11 +521,10 @@ sub pml2pdb($job_dir, $pdb_path, $pml_path) {
   my %file_by_time_point = map {
     my $time_point = $_;
     
-    my $pdb_name = $pml_name."_$time_point.pdb";
-    $pdb_name_by_time_point{$time_point} = $pdb_name;
+    my $new_pdb_name = $pdb_name."_$time_point.pdb";
+    $pdb_name_by_time_point{$time_point} = $new_pdb_name;
 
-    #my $pdb_path = $pdb_dir.'/'.$pdb_name;
-    my $pdb_path = $job_dir.'/'.$pdb_name;
+    my $pdb_path = $job_dir.'/'.$new_pdb_name;
     push(@output_files, $pdb_path);
     
     my $fh;
@@ -426,7 +686,8 @@ sub pdb2fasta($job_dir, $pdb_path) {
   my $fasta_file_path = "$job_dir/$pdb_name.fasta";
   open(FASTA_FILE,'>',$fasta_file_path) or die $!;
   
-  foreach my $chain(sort keys %chain_hash){
+  my @chains = sort keys %chain_hash;
+  foreach my $chain (@chains){
 
     ### Insert X AA where no AA was found from PDB file
     my @aa_seq = @{$chain_hash{$chain}};
@@ -445,7 +706,7 @@ sub pdb2fasta($job_dir, $pdb_path) {
   
   close FASTA_FILE;
 
-  return $fasta_file_path;
+  return ($fasta_file_path, \@chains);
 }
 
 
@@ -531,44 +792,81 @@ __DATA__
 
 <body>
   <p></p>
-  <h1>HDX Viewer</h1>
+  
+  <h1>HDX Viewer <button id="btn-display-help" class="bouton" onclick="alert('Help page under construction...'); return; window.open('./help/index.html');" style="width: 100px; margin-left: 170px;" >HELP!</button> </h1>
+  
   <table valign="top">
     <tbody>
       <tr>
         <td style="width: 600px;">
 
           <fieldset class="cadre" id="fieldset-files" style="padding: 10px"> <legend>Input Data</legend>
+
             <div style="height: 40px;">
-              <span style="float: left; margin-right: 20px;">
-                <button class="bouton" onclick="loadDemoFiles()">Load demo files</button>
+              <span>
+                <span id="spn-pml-format" >
+                  <label>PML format: </label>
+                  <input id="rad-dx-format" type="radio" name="pml-format" value="DynamX" style="margin-left: 20px" checked="checked" /> <label for="rad-dx-format" >DynamX</label>
+                  <input id="rad-hde-format" type="radio" name="pml-format" value="HDExaminer"  style="margin-left: 20px" /> <label for="rad-hde-format" >HDExaminer</label>
+                </span>
+                
+                <span id="spn-hde-chain" style="visibility: hidden;" >
+                  <label for="lbl-sel-hde-chain">-> chain:</label>
+                  <select id="sel-hde-chain" name="hde-chain" style="width: 80px;" ></select>
+                </span>
+                
               </span>
+        
+              <!-- The first file input field used as target for the file upload widget -->
+              <span id="spn-pdb-upload" class="upload-btn-wrapper" style="float: left; margin-right: 20px;" >
               
-              <!-- The file input field used as target for the file upload widget -->
-              <span class="upload-btn-wrapper" style="float: left;">
-              
-                <button class="upload-btn">Upload PDB/PML files</button>
+                <button class="upload-btn">Upload PDB file</button>
                 
-                <label for="fileupload" class="upload-label">
+                <label for="file-pdb" class="upload-label">
                 
-                  <input id="fileupload" name="files[]" multiple="" type="file"  />
+                  <input id="file-pdb" name="file" type="file" accept=".pdb" />
                 
                 </label>
                 
               </span>
-
+              
+              <!-- The second file input field used as target for the file upload widget -->
+              <span id="spn-pml-upload" class="upload-btn-wrapper" style="float: left; display: none;" >
+              
+                <button class="upload-btn">Upload PML files</button>
+                
+                <label for="file-pml" class="upload-label">
+                
+                  <input id="file-pml" name="files[]" multiple="" type="file" accept=".pml" />
+                
+                </label>
+                
+              </span>
+              
               <span style="float: left; margin-left: 20px;">
-                <button class="bouton" onclick="downloadOutputFiles()">Download results</button>
+                <button class="bouton" style="width: 120px; display: none" onclick="processLoadedFiles()"><b>Process files!</b></button>
               </span>
               
             </div>
             
+            <div style="height: 40px; margin-top: 20px; padding-top: 20px;">
+            
+              <span style="float: left; margin-right: 20px;">
+                <button class="bouton" onclick="loadDemoFiles()">Load demo files</button>
+              </span>
+              
+              <span style="float: left">
+                <button id="btn-download-results" class="bouton" onclick="downloadOutputFiles()" style="display: none;">Download results</button>
+              </span>
+            </div>
+            
             <!-- The global progress bar -->
-            <div id="progress" class="progress">
+            <div id="progress" class="progress" >
               <div class="progress-bar progress-bar-success"></div>
             </div>
               
             <!-- The container for the uploaded files -->
-            <div id="uploaded-files" class="files" style="margin-top: 10px;"></div>
+            <div id="div-uploaded-files" class="files" style="margin-top: 10px;"></div>
             
           </fieldset>
           
@@ -755,6 +1053,7 @@ __DATA__
       </tr>
     </tbody>
   </table>
+  
   <p><br>
   </p>
   <p> <br>
@@ -766,6 +1065,3 @@ __DATA__
   
 </body>
 </html>
-
-
-
