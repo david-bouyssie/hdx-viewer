@@ -546,7 +546,7 @@ sub pml2pdb($job_dir, $pdb_path, $pml_path) {
 
     # Exemple: ATOM  23404  CA  LEU N 237     -87.407  -0.364 160.421  1.00 78.66           C
     # Exemple: ATOM    914  N   LEU A 115    -104.983  71.146  72.849  1.00  0.01           N
-    if ($line =~ /ATOM\s+\d+\s+\w+\s+\w+\s+([A-Z])\s+(-*\d+)/ || $line =~ /HETATM\s+\d+\s+\w+\s+\w+\s+([A-Z])\s+(-*\d+)/) {
+    if ($line =~ /ATOM\s+\d+\s+\w+\s+\w+\s+(\w)\s+(-*\d+)/ || $line =~ /HETATM\s+\d+\s+\w+\s+\w+\s+(\w)\s+(-*\d+)/) {
     
       #say "found atom line";
 
@@ -569,8 +569,8 @@ sub pml2pdb($job_dir, $pdb_path, $pml_path) {
         
         ### Substitue le B factor dans la ligne provenant du fichier PDB
         #print $line;
-        if ($line =~ /(ATOM\s+\d+\s+\w+\s+\w+\s+[A-Z]\s+\d+\s+\S+\s+\S+\s+\S+\s+\d+\.\d{2})(\s*)(\S+)(\s+)([A-Z]\s*)/ ||
-            $line =~ /(HETATM\s+\d+\s+\w+\s+\w+\s+[A-Z]\s+\d+\s+\S+\s+\S+\s+\S+\s+\d+\.\d{2})(\s*)(\S+)(\s+)([A-Z]\s*)/
+        if ($line =~ /(ATOM\s+\d+\s+\w+\s+\w+\s+\w\s+-*\d+\s+\S+\s+\S+\s+\S+\s+\d+\.\d{2})(\s*)(\S+)(\s+)([A-Z]\s*)/ ||
+            $line =~ /(HETATM\s+\d+\s+\w+\s+\w+\s+\w\s+-*\d+\s+\S+\s+\S+\s+\S+\s+\d+\.\d{2})(\s*)(\S+)(\s+)([A-Z]\s*)/
           ) {
           #say "found old bfactor";
           
@@ -584,7 +584,7 @@ sub pml2pdb($job_dir, $pdb_path, $pml_path) {
           my $old_b_factor_len = length($old_b_factor);
           my $space_len = length($space_after_b_factor);
           
-          my $new_space_len = ($before_b_factor_space_len -1 ) + ($old_b_factor_len + $space_len) - $b_factor_len;
+          my $new_space_len = ($before_b_factor_space_len - 1 ) + ($old_b_factor_len + $space_len) - $b_factor_len;
           my $new_space_after_b_factor = ' ' x $new_space_len;
           
           $line = "$before_b_factor $b_factor$new_space_after_b_factor$after_b_factor";               
@@ -793,7 +793,7 @@ __DATA__
 <body>
   <p></p>
   
-  <h1>HDX Viewer <button id="btn-display-help" class="bouton" onclick="alert('Help page under construction...'); return; window.open('./help/index.html');" style="width: 100px; margin-left: 170px;" >HELP!</button> </h1>
+  <h1>HDX Viewer <button id="btn-display-help" class="bouton" onclick="window.open('./help/index.html');" style="width: 100px; margin-left: 170px;" >HELP!</button> </h1>
   
   <table valign="top">
     <tbody>
