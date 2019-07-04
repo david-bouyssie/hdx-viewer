@@ -37,7 +37,11 @@ say "HDX-Viewer will load static files from: " .join("\n",@{app->static->paths})
 my $hde_heatmap_colors_map = parse_hdexaminer_colors( [read_file("./conf/hdexaminer_heatmap_colors.txt")] );
 my $hde_diff_heatmap_colors_map = parse_hdexaminer_colors( [read_file("./conf/hdexaminer_diff_heatmap_colors.txt")] );
 
+my $UNDETECTED_BFACTOR_VALUE = -111;
+
 my $UPLOAD_DIR = "./public/uploads/";
+mkdir($UPLOAD_DIR);
+
 my $last_job_number = 0;
 
 # Render template "index.html.ep" from the DATA section
@@ -98,7 +102,7 @@ post '/pdb_upload' => sub {
 };
 
 # Multipart upload handler
-post '/pml_upload' => sub {
+post '/pml_or_csv_upload' => sub {
   my $c = shift;
 
   # Check file size
@@ -106,8 +110,11 @@ post '/pml_upload' => sub {
   
   my $job_id = $c->req->param('job_id');
   my $chains = $c->req->param('chains');
+  my $file_format = $c->req->param('hdx_file_format');
+  my $uc_file_format = uc($file_format);
   
   ### Check inputs
+  return $c->render(json => {error => "Provided file format must be CSV or PML"}, status => 200) unless $file_format eq 'csv' or $file_format eq 'pml';
   return $c->render(json => {error => "Can't continue since no PDB files were uploaded"}, status => 200) unless $job_id;
   return $c->render(json => {error => "Invalid characters in provided chains '$chains'"}, status => 200) unless $chains =~ /^[a-zA-Z0-9]+$/;
   
@@ -120,10 +127,10 @@ post '/pml_upload' => sub {
     for my $file (@{$c->req->uploads('files')}) {
       my $size = $file->size;
       my $name = $file->filename;
-      if (not $name =~ /.+\.pml/) { $c->render(json => {error => "Invalid input: file must be in PML format"} ); }
+      if (not $name =~ /.+\.$file_format/) { $c->render(json => {error => "Invalid input: file must be in $uc_file_format format"} ); }
       
       my $uploaded_file_location = "$job_chains_input_dir/" . $file->filename;
-      say "Uploaded PML file location: $uploaded_file_location";
+      say "Uploaded $uc_file_format file location: $uploaded_file_location";
       
       $file->move_to($uploaded_file_location);
     }
@@ -132,7 +139,7 @@ post '/pml_upload' => sub {
     
   } catch {
     warn "caught error: $_"; # not $@
-    $c->render(json => {error => "PML files upload failed\n". _split_error_msg($_)} );
+    $c->render(json => {error => "$uc_file_format files upload failed\n". _split_error_msg($_)} );
   };
   
 };
@@ -143,8 +150,11 @@ get '/process_files' => sub {
   
   my $job_id = $c->req->param('job_id');
   my $chains = $c->req->param('chains');
+  my $file_format = $c->req->param('hdx_file_format');
+  my $uc_file_format = uc($file_format);
   
   ### Check inputs
+  return $c->render(json => {error => "Provided file format must be CSV or PML"}, status => 200) unless $file_format eq 'csv' or $file_format eq 'pml';
   return $c->render(json => {error => "Can't continue since no input files were uploaded"}, status => 200) unless $job_id;
   return $c->render(json => {error => "Invalid characters in provided chains '$chains'"}, status => 200) unless $chains =~ /^[a-zA-Z0-9]+$/;
   
@@ -161,11 +171,11 @@ get '/process_files' => sub {
   say "Found ".scalar(@fasta_files). " FASTA files in current job directory ($job_dir)";
   my $fasta_file = shift(@fasta_files);
   
-  my @pml_file_paths = <$job_chains_input_dir/*.pml>;
-  say "Found ".scalar(@pml_file_paths). " PML files in current chains directory ($job_chains_input_dir)";
+  my @hdx_files = <$job_chains_input_dir/*.$file_format>;
+  say "Found ".scalar(@hdx_files). " $uc_file_format files in current chains directory ($job_chains_input_dir)";
   
-  my $pml_files_count = scalar(@pml_file_paths);
-  if ($pdb_file_path && $pml_files_count) {
+  my $hdx_files_count = scalar(@hdx_files);
+  if ($pdb_file_path && $hdx_files_count) {
   
     ### Create/backup merge PML file
     my($pdb_name,$pdb_dir,$pdb_ext) = fileparse($pdb_file_path,'.pdb');
@@ -177,14 +187,18 @@ get '/process_files' => sub {
         copy($merged_pml_file_path,$merged_pml_file_backup_path) or die "Merged PML backup failed: $!";
       }
       
-      my $is_hdexaminer_pml = is_hdexaminer_pml($pml_file_paths[0]);
-      
-      if ($is_hdexaminer_pml) {
-        hdexaminer2dynamx(\@pml_file_paths, $chains, $merged_pml_file_path, $temp_dir);
-      }
-      else {
-        #$merged_pml_file_path = $pml_files_count == 1 ? $pml_file_paths[0] : merge_pml_files(\@pml_file_paths, $merged_pml_file_path);
-        merge_pml_files(\@pml_file_paths, $merged_pml_file_path);
+      if ($file_format eq 'csv') {
+        csv_to_dynamx_pml(\@hdx_files, $chains, $merged_pml_file_path);
+      } else {
+        my $is_hdexaminer_pml = is_hdexaminer_pml($hdx_files[0]);
+        
+        if ($is_hdexaminer_pml) {
+          hdexaminer_pml_to_dynamx_pml(\@hdx_files, $chains, $merged_pml_file_path, $temp_dir);
+        }
+        else {
+          #$merged_pml_file_path = $hdx_files_count == 1 ? $hdx_files[0] : merge_pml_files(\@hdx_files, $merged_pml_file_path);
+          merge_pml_files(\@hdx_files, $merged_pml_file_path);
+        }
       }
       
       my ($output_files, $bfactor_mapping) = pml2pdb($job_dir, $pdb_file_path, $merged_pml_file_path);
@@ -196,8 +210,8 @@ get '/process_files' => sub {
     } catch {
       warn "caught error: $_"; # not $@
       
-      say "Removing uploaded and generated PML files...";
-      for my $file (@pml_file_paths, $merged_pml_file_path) {
+      say "Removing uploaded files and generated PML files...";
+      for my $file (@hdx_files, $merged_pml_file_path) {
         unlink $file if -f $file;
       }
       
@@ -235,18 +249,18 @@ get '/download_results' => sub ($c) {
   
   #my $files = $c->req->json;
   my $fasta_file = $c->param('fasta_file');
-  my $pml_format = $c->param('pml_format');
+  my $hdx_data_type = $c->param('hdx_data_type');
   my @pdb_files = @{$c->every_param('pdb_files[]')};
   
   if (not $fasta_file =~ /^\.\/public/) {
     #say "invalid fasta_file file location";
-    return $c->reply->exception("invalid fasta_file file location");
+    return $c->reply->exception("Invalid fasta_file file location");
   }
   
   my( $job_dir, $job_suffix);
   if ($fasta_file =~ /^\.\/public\/demo/ ) {
     $job_dir = './public/demo';
-    $job_suffix = lc($pml_format) .'-demo-dataset';
+    $job_suffix = lc($hdx_data_type) .'-demo-dataset';
   } else {
     $job_dir = dirname($fasta_file);
     $job_suffix = basename($job_dir);
@@ -342,13 +356,83 @@ else {
   Mojo::IOLoop->start unless Mojo::IOLoop->is_running;
 }
 
+sub csv_to_dynamx_pml($csv_paths, $chains_as_str, $merged_pml_file) {
+  
+  my $merged_pml_str = '';
+  my (@residue_positions, @hdx_values_matrix, @hdx_values_sums); ### these array/matrix both contain headers
+  
+  for my $csv_path (@$csv_paths) {
+    my $csv_name = basename($csv_path);
+    $csv_name =~ s/\.csv$//;
+  
+    ### Read CSV file ###
+    my $csv_as_str = read_file($csv_path);
+    my @csv_lines = map { my $l = $_; chomp($l); [split(',', $l)] } split("\n", $csv_as_str);
+    
+    my @header_cells = @{$csv_lines[0]};
+    my $is_custom_csv = lc($header_cells[0]) ne 'start';
+    
+    ### Detect CSV file format ###
+    my @hdx_values_indices = $is_custom_csv ? 1 .. scalar(@header_cells) - 1 :  2 ..  1 + ((scalar(@header_cells) - 2) / 2);
+    #say "hdx_values_indices=" . Dumper(\@hdx_values_indices);
+    
+    for my $col_idx (0..scalar(@hdx_values_indices) - 1) {
+      $hdx_values_matrix[$col_idx] = [];
+    }
+    
+    my $last_row_idx = scalar(@csv_lines) - 1;
+    for my $row_idx (0..$last_row_idx) {
+      $hdx_values_sums[$row_idx] = 0;
+    }
+    
+    ### Parse CSV file into some data structures ###
+    my $row_idx = 0;
+    for my $line (@csv_lines) {
+      push(@residue_positions, $line->[0]);
+      
+      my $col_idx = 0;
+      for my $cell_idx (@hdx_values_indices) {
+        #my $hdx_time_point_values = $hdx_values_matrix[$col_idx] || [];
+        my $hdx_value = $line->[$cell_idx];
+        push(@{$hdx_values_matrix[$col_idx]}, $hdx_value);
+        
+        ### Update some of HDX values (encoded in PDB file as B-factors)
+        $hdx_values_sums[$row_idx] += $hdx_value if $row_idx > 0;
+        
+        $col_idx++;
+      }
+      
+      $row_idx++;
+    }
+    
+    die "Invalid hdx_values_matrix size" unless scalar(@{$hdx_values_matrix[0]}) == scalar(@residue_positions);
+    
+    my $last_col_idx = scalar(@hdx_values_matrix) - 1;
+   
+    
+    ### Convert the HDX value matrix into a PML string ###
+    for my $hdx_time_point_values (@hdx_values_matrix) {
+      my $time_point_label = $hdx_time_point_values->[0];
+      my $properties_str = "$time_point_label ($csv_name)";
+      $properties_str =~ s/ /_/g;
+
+      for my $row_idx (1..$last_row_idx) {
+        my $res_num = $residue_positions[$row_idx];
+        my $b_factor = $hdx_values_sums[$row_idx] == 0 ? $UNDETECTED_BFACTOR_VALUE : $hdx_time_point_values->[$row_idx];
+        $merged_pml_str .= "alter /$csv_name//$chains_as_str/$res_num, properties[\"$properties_str\"] = $b_factor\n";
+      }
+    }
+  }
+
+  write_file($merged_pml_file, $merged_pml_str);
+}
 
 sub is_hdexaminer_pml($pml_path) {
   my $pml_as_str = read_file($pml_path);
   return ($pml_as_str =~ /set_color/);
 }
 
-sub hdexaminer2dynamx($pml_paths, $chains_as_str, $merged_pml_file, $temp_dir) {
+sub hdexaminer_pml_to_dynamx_pml($pml_paths, $chains_as_str, $merged_pml_file, $temp_dir) {
   
   my (@converted_pml_paths, @time_points_in_secs);
   for my $pml_path (@$pml_paths) {
@@ -395,9 +479,9 @@ sub hdexaminer2dynamx($pml_paths, $chains_as_str, $merged_pml_file, $temp_dir) {
         
         for my $res_num ($min_res_num .. $max_res_num) {
           #say NEW_PML "alter /$pml_prefix//$chains_as_str/$res_num, properties[\"$pdb_name $hdx_time $dmx_unit ($pml_prefix$pml_suffix)\"] = $b_factor";
-          my $properies_str = "$hdx_time $dmx_unit ($pml_prefix$pml_suffix)";
-          $properies_str =~ s/ /_/g;
-          say NEW_PML "alter /$pml_prefix//$chains_as_str/$res_num, properties[\"$properies_str\"] = $b_factor";
+          my $properties_str = "$hdx_time $dmx_unit ($pml_prefix$pml_suffix)";
+          $properties_str =~ s/ /_/g;
+          say NEW_PML "alter /$pml_prefix//$chains_as_str/$res_num, properties[\"$properties_str\"] = $b_factor";
         }
       }
     }
@@ -444,8 +528,8 @@ sub prepare_merged_pml_file($temp_dir, $pdb_name) {
 
 sub merge_pml_files($pml_paths, $merged_pml_file) {  
   my @pml_files_to_merge = -f $merged_pml_file ? ($merged_pml_file, @$pml_paths) : @$pml_paths;
-  my $merge_str =  join( '', map { read_file($_) } @pml_files_to_merge);
-  write_file($merged_pml_file, $merge_str);
+  my $merged_str =  join( '', map { read_file($_) } @pml_files_to_merge);
+  write_file($merged_pml_file, $merged_str);
 }
 
 ### Source: https://github.com/kad-ecoli/pdb2fasta/blob/master/pdb2fasta.pl
@@ -474,7 +558,7 @@ sub pml2pdb($job_dir, $pdb_path, $pml_path) {
     
     if ($line =~ /^$/ ) {next;}
     #elsif ($line =~ /alter \/\w+\/\/(\w+)\/(\d+), properties\[".*?(\d+\s\w+)"\] = ([-]?\d+[\.,]?\d*)/) {
-    elsif ($line =~ /alter \/\w+\/\/(\w*)\/([-]?\d+).*, properties\["(.+)"\] = (.+)/) {
+    elsif ($line =~ /alter \/.+\/\/(\w*)\/([-]?\d+).*, properties\["(.+)"\] = (.+)/) {
       my $chains = $1;
       die "Invalid PML entry, missing chain information in line: $line" if length($chains) == 0;
       
@@ -482,7 +566,7 @@ sub pml2pdb($job_dir, $pdb_path, $pml_path) {
       my $time_point_str = $3;
       my $b_factor = $4;
       $b_factor =~ s/,/\./;
-      $b_factor += 0;
+      $b_factor += 0; ### every important for MSA viewer
       
       #say "residue_pos $residue_pos b_factor = $b_factor";
       
@@ -562,15 +646,15 @@ sub pml2pdb($job_dir, $pdb_path, $pml_path) {
       
         ### Récupère le B factor pour le time point considéré
         my $obs_bfactor = $b_factor_by_time_point->{ "$time_point" };
-        my $b_factor = defined $obs_bfactor ? $obs_bfactor : -1;
+        my $b_factor = defined $obs_bfactor ? $obs_bfactor : $UNDETECTED_BFACTOR_VALUE;
         my $b_factor_len = length("$b_factor");
         
         #say "found bfactor";
         
         ### Substitue le B factor dans la ligne provenant du fichier PDB
         #print $line;
-        if ($line =~ /(ATOM\s+\d+\s+\w+\s+\w+\s+\w\s+-*\d+\s+\S+\s+\S+\s+\S+\s+\d+\.\d{2})(\s*)(\S+)(\s+)([A-Z]\s*)/ ||
-            $line =~ /(HETATM\s+\d+\s+\w+\s+\w+\s+\w\s+-*\d+\s+\S+\s+\S+\s+\S+\s+\d+\.\d{2})(\s*)(\S+)(\s+)([A-Z]\s*)/
+        if ($line =~ /(ATOM\s+\d+\s+\w+\s+\w+\s+\w\s+-*\d+\s+\S+\s+\S+\s+\S+\s+\d+\.\d{2})(\s*)(\S+)(\s+)([A-Z].*)/ ||
+            $line =~ /(HETATM\s+\d+\s+\w+\s+\w+\s+\w\s+-*\d+\s+\S+\s+\S+\s+\S+\s+\d+\.\d{2})(\s*)(\S+)(\s+)([A-Z].*)/
           ) {
           #say "found old bfactor";
           
@@ -579,6 +663,7 @@ sub pml2pdb($job_dir, $pdb_path, $pml_path) {
           my $old_b_factor = $3;
           my $space_after_b_factor = $4;
           my $after_b_factor = $5;
+          chomp($after_b_factor);
           
           my $before_b_factor_space_len = length($before_b_factor_space);
           my $old_b_factor_len = length($old_b_factor);
@@ -587,7 +672,7 @@ sub pml2pdb($job_dir, $pdb_path, $pml_path) {
           my $new_space_len = ($before_b_factor_space_len - 1 ) + ($old_b_factor_len + $space_len) - $b_factor_len;
           my $new_space_after_b_factor = ' ' x $new_space_len;
           
-          $line = "$before_b_factor $b_factor$new_space_after_b_factor$after_b_factor";               
+          $line = "$before_b_factor $b_factor$new_space_after_b_factor$after_b_factor\n";               
         }
         
         # if ($line =~ /(ATOM\s+\d+\s+\w+\s+\w+\s+[A-Z]\s+\d+\s+\S+\s+\S+\s+\S+\s+\d+\.\d{2}\s*)(\S+)(\s+)([A-Z]\s*)/ ||
@@ -804,10 +889,10 @@ __DATA__
 
             <div style="height: 40px;">
               <span>
-                <span id="spn-pml-format" >
-                  <label>PML format: </label>
-                  <input id="rad-dx-format" type="radio" name="pml-format" value="DynamX" style="margin-left: 20px" checked="checked" /> <label for="rad-dx-format" >DynamX</label>
-                  <input id="rad-hde-format" type="radio" name="pml-format" value="HDExaminer"  style="margin-left: 20px" /> <label for="rad-hde-format" >HDExaminer</label>
+                <span id="spn-hdx-data-type" >
+                  <label>HDX data type: </label>
+                  <input id="rad-dx-format" type="radio" name="hdx-data-type" value="DynamX" style="margin-left: 10px" checked="checked" /> <label for="rad-dx-format" >DynamX</label>
+                  <input id="rad-hde-format" type="radio" name="hdx-data-type" value="HDExaminer"  style="margin-left: 10px" /> <label for="rad-hde-format" >HDExaminer / CSV</label>
                 </span>
                 
                 <span id="spn-hde-chain" style="visibility: hidden;" >
@@ -838,6 +923,19 @@ __DATA__
                 <label for="file-pml" class="upload-label">
                 
                   <input id="file-pml" name="files[]" multiple="" type="file" accept=".pml" />
+                
+                </label>
+                
+              </span>
+              
+              <!-- The third file input field used as target for the file upload widget -->
+              <span id="spn-csv-upload" class="upload-btn-wrapper" style="float: left; display: none;" >
+              
+                <button class="upload-btn">Upload CSV files</button>
+                
+                <label for="file-csv" class="upload-label">
+                
+                  <input id="file-csv" name="files[]" multiple="" type="file" accept=".csv" />
                 
                 </label>
                 
