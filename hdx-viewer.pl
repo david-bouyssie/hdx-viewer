@@ -1154,7 +1154,11 @@ __DATA__
   
   <p><br>
   </p>
-  <p> <br>
+  <p style="color:white">
+    If you use HDX-Viewer for your research please cite:<br/>
+    David Bouyssié*, Jean Lesne*, Marie Locard-Paulet, Renaud Albigot, Odile Burlet-Schiltz, Julien Marcoux: HDX-Viewer: interactive 3D visualization of hydrogen-deuterium exchange data.<br/>
+    Bioinformatics, btz550, <a href="https://doi.org/10.1093/bioinformatics/btz550" style="color:lightblue" target="_blank" >https://doi.org/10.1093/bioinformatics/btz550</a> <br/><br/>
+    *These authors contributed equally
   </p>
   
   <div height="200">
